@@ -1,13 +1,14 @@
 /**
- * Basic LangChain.js Workflow: Content Generation Pipeline
+ * Basic LangChain.js Workflow: Email Composer Pipeline
  *
  * This script demonstrates a sequential 3-step workflow:
- *   Topic → [Generate Outline] → [Write Draft] → [Create Summary]
+ * Key points + tone → [Draft Email] → [Check for Issues] → [Final Version]
  *
  * Key concepts:
- *   - Prompt templates with variable substitution
- *   - Sequential chain execution (pipe operator)
- *   - Error handling with retry logic
+ * - Prompt templates with variable substitution
+ * - Sequential chain execution (pipe operator)
+ * - Error handling with retry logic
+ * - Passing multiple variables down a composed chain
  */
 
 import "dotenv/config";
@@ -34,38 +35,43 @@ const llm = new ChatGroq({
 });
 const outputParser = new StringOutputParser();
 
-// --- Step 1: Generate Outline ---
+// --- Step 1: Draft Email ---
 
-const outlinePrompt = ChatPromptTemplate.fromTemplate(
-  `Create a brief outline for a blog post about: {topic}
+const draftEmailPrompt = ChatPromptTemplate.fromTemplate(
+  `Draft an email based on the following key points:
+{keyPoints}
 
-The outline should have 3-4 main sections with 2-3 bullet points each.
-Format it as a numbered list.`
+Ensure the tone of the email is: {tone}.`
 );
 
-const outlineChain = outlinePrompt.pipe(llm).pipe(outputParser);
+const draftEmailChain = draftEmailPrompt.pipe(llm).pipe(outputParser);
 
-// --- Step 2: Write Draft ---
+// --- Step 2: Check for Issues ---
 
-const draftPrompt = ChatPromptTemplate.fromTemplate(
-  `Write a short blog post (about 300 words) based on this outline:
+const checkIssuesPrompt = ChatPromptTemplate.fromTemplate(
+  `Review the following email draft. Identify any issues related to clarity, grammar, tone inconsistency, or missing information.
+List the issues concisely. If there are no major issues, reply with "No major issues found."
 
-{outline}
-
-Make it engaging and informative. Use a conversational tone.`
-);
-
-const draftChain = draftPrompt.pipe(llm).pipe(outputParser);
-
-// --- Step 3: Summarize ---
-
-const summaryPrompt = ChatPromptTemplate.fromTemplate(
-  `Summarize this blog post in 2-3 sentences:
-
+Email Draft:
 {draft}`
 );
 
-const summaryChain = summaryPrompt.pipe(llm).pipe(outputParser);
+const checkIssuesChain = checkIssuesPrompt.pipe(llm).pipe(outputParser);
+
+// --- Step 3: Final Version ---
+
+const finalVersionPrompt = ChatPromptTemplate.fromTemplate(
+  `You are an expert editor. Here is an original email draft and a list of issues found during review.
+Rewrite the email to fix all the issues and improve its overall flow. Output ONLY the final polished email.
+
+Original Draft:
+{draft}
+
+Issues to fix:
+{issues}`
+);
+
+const finalVersionChain = finalVersionPrompt.pipe(llm).pipe(outputParser);
 
 // --- Error Handling: Retry with Exponential Backoff ---
 
@@ -96,51 +102,51 @@ async function callWithRetry(chain, inputs, maxRetries = 3) {
 
 // --- Run the Workflow ---
 
-async function runWorkflow(topic) {
+async function runWorkflow(keyPoints, tone) {
   console.log("=".repeat(60));
-  console.log(`Content Generation Workflow`);
-  console.log(`Topic: "${topic}"`);
+  console.log(`Email Composer Workflow`);
+  console.log(`Key Points: "${keyPoints}"\nTone: "${tone}"`);
   console.log("=".repeat(60));
 
   // Step 1
-  console.log("\nSTEP 1: Generating outline...");
-  let outline;
+  console.log("\nSTEP 1: Drafting initial email...");
+  let draft;
   try {
-    outline = await callWithRetry(outlineChain, { topic });
-    console.log(outline);
+    draft = await callWithRetry(draftEmailChain, { keyPoints, tone });
+    console.log(draft);
   } catch (error) {
-    console.error(`FATAL: Outline generation failed: ${error.message}`);
-    console.error("Cannot continue without an outline.");
+    console.error(`FATAL: Initial draft generation failed: ${error.message}`);
+    console.error("Cannot continue without a draft.");
     return;
   }
 
   // Step 2
   console.log("\n" + "-".repeat(60));
-  console.log("STEP 2: Writing draft...");
-  let draft;
+  console.log("STEP 2: Checking for issues...");
+  let issues;
   try {
     // Validate intermediate output before passing to next step
-    if (outline.trim().length < 50) {
+    if (draft.trim().length < 20) {
       throw new Error(
-        "Outline is too short — LLM may have returned incomplete output."
+        "Draft is too short — LLM may have returned incomplete output."
       );
     }
-    draft = await callWithRetry(draftChain, { outline });
-    console.log(draft);
+    issues = await callWithRetry(checkIssuesChain, { draft });
+    console.log(issues);
   } catch (error) {
-    console.error(`FATAL: Draft generation failed: ${error.message}`);
+    console.error(`FATAL: Issue checking failed: ${error.message}`);
     return;
   }
 
   // Step 3
   console.log("\n" + "-".repeat(60));
-  console.log("STEP 3: Creating summary...");
+  console.log("STEP 3: Creating final version...");
   try {
-    const summary = await callWithRetry(summaryChain, { draft });
-    console.log(summary);
+    const finalEmail = await callWithRetry(finalVersionChain, { draft, issues });
+    console.log(finalEmail);
   } catch (error) {
-    // Summary is non-critical — we still have the draft
-    console.warn(`WARNING: Summary failed (${error.message}). Skipping.`);
+    // Final version is critical here, unlike the summary in the previous script
+    console.error(`FATAL: Final version generation failed: ${error.message}`);
   }
 
   console.log("\n" + "=".repeat(60));
@@ -149,22 +155,27 @@ async function runWorkflow(topic) {
 
 // --- Bonus: Composed Single Chain ---
 
-async function runComposedWorkflow(topic) {
+async function runComposedWorkflow(keyPoints, tone) {
   console.log("\n" + "=".repeat(60));
   console.log("Running as a single composed chain...");
   console.log("=".repeat(60));
 
-  // Compose all steps into one chain using the pipe operator
-  const fullWorkflow = outlineChain
-    .pipe(new RunnableLambda({ func: (outline) => ({ outline }) }))
-    .pipe(draftChain)
+  // Compose all steps into one chain. 
+  // We use RunnableLambda to pass the 'draft' forward alongside 'issues' so Step 3 has both.
+  const fullWorkflow = draftEmailChain
     .pipe(new RunnableLambda({ func: (draft) => ({ draft }) }))
-    .pipe(summaryChain);
+    .pipe(new RunnableLambda({ 
+        func: async ({ draft }) => {
+            const issues = await checkIssuesChain.invoke({ draft });
+            return { draft, issues };
+        }
+    }))
+    .pipe(finalVersionChain);
 
   try {
-    const summary = await fullWorkflow.invoke({ topic });
-    console.log("\nFinal summary:");
-    console.log(summary);
+    const finalEmail = await fullWorkflow.invoke({ keyPoints, tone });
+    console.log("\nFinal Email:");
+    console.log(finalEmail);
   } catch (error) {
     console.error(`Workflow failed: ${error.message}`);
   }
@@ -172,7 +183,8 @@ async function runComposedWorkflow(topic) {
 
 // --- Main ---
 
-const topic = process.argv[2] || "how AI is changing web development";
+const keyPoints = process.argv[2] || "Project ISAAC is delayed by 2 weeks due to supply chain issues. Ask for a brief meeting next Tuesday.";
+const tone = process.argv[3] || "Professional, apologetic, and solution-oriented";
 
-await runWorkflow(topic);
-await runComposedWorkflow(topic);
+await runWorkflow(keyPoints, tone);
+await runComposedWorkflow(keyPoints, tone);
